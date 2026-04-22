@@ -1,31 +1,31 @@
-# 🎬 CineAI – Netflix-Style Movie Recommender
+#  CineAI – Netflix-Style Movie Recommender
 
 ![Python](https://img.shields.io/badge/Python-3.10-blue?logo=python)
 ![Streamlit](https://img.shields.io/badge/Streamlit-1.35-red?logo=streamlit)
 ![scikit-learn](https://img.shields.io/badge/scikit--learn-1.4-orange?logo=scikit-learn)
-![AWS EC2](https://img.shields.io/badge/Deployed-AWS%20EC2-yellow?logo=amazonaws)
+![GitHub Pages](https://img.shields.io/badge/Hosted-GitHub%20Pages-blue?logo=github)
 ![CI/CD](https://img.shields.io/badge/CI%2FCD-GitHub%20Actions-green?logo=githubactions)
 ![License](https://img.shields.io/badge/License-MIT-lightgrey)
 
-> **AI-powered movie recommendations using TF-IDF vectorization and cosine similarity on 20,000+ TMDB movies. Netflix-style dark UI built with Streamlit, deployed on AWS EC2.**
+> **Smart movie recommendations using Smart movie recommendations using cosine similarity and live TMDB API integration. Netflix-style UI deployed using GitHub Pages cloud hosting.. Netflix-style dark UI built with Streamlit, deployed on GitHub Pages cloud hosting.**
 
 ---
 
-## 📸 Features
+## Features
 
 | Feature | Description |
 |---------|-------------|
-| 🔍 Smart Search | 3-tier fuzzy matching: exact → prefix → contains |
-| 🤖 AI Recommendations | TF-IDF + cosine similarity on weighted features |
-| 🔥 Trending / Top Rated | TMDB popularity & vote-based rankings |
-| 🎭 Browse by Genre | 15 genres with instant filtering |
-| 💎 Hidden Gems | High-rated, low-popularity picks |
-| 📅 Browse by Decade | 1970s–2020s decade switcher |
-| 🖼️ Smart Posters | 3-tier: TMDB CDN → Live API → SVG fallback |
+|  Smart Search | 3-tier fuzzy matching: exact → prefix → contains |
+|  AI Recommendations | TF-IDF + cosine similarity on weighted features |
+|  Trending / Top Rated | TMDB popularity & vote-based rankings |
+|  Browse by Genre | 15 genres with instant filtering |
+|  Hidden Gems | High-rated, low-popularity picks |
+|  Browse by Decade | 1970s–2020s decade switcher |
+|  Smart Posters | 3-tier: TMDB CDN → Live API → SVG fallback |
 
 ---
 
-## 🧠 ML Pipeline
+##  ML Pipeline
 
 ```
 movies_metadata.csv (TMDB, 45k raw)
@@ -41,7 +41,7 @@ movies_metadata.csv (TMDB, 45k raw)
   similarity.pkl + movies_clean.csv
 ```
 
-### 📊 Evaluation Metrics
+### Evaluation Metrics
 
 | Metric | Score |
 |--------|-------|
@@ -55,7 +55,7 @@ movies_metadata.csv (TMDB, 45k raw)
 
 ---
 
-## 🚀 Quick Start
+## Quick Start
 
 ### Local Setup
 
@@ -94,7 +94,7 @@ cp .env.example .env
 
 ---
 
-## ☁️ AWS EC2 Deployment
+## Docker
 
 ```bash
 # Launch Ubuntu 22.04 EC2 t2.micro, open port 8501 in Security Group
@@ -121,7 +121,7 @@ screen -dmS cineai streamlit run app.py --server.port 8501 --server.address 0.0.
 
 ---
 
-## 🐳 Docker
+## Docker
 
 ```bash
 # Build
@@ -135,7 +135,7 @@ docker run -p 8501:8501 cineai
 
 ---
 
-## 🔄 CI/CD Pipeline
+##  CI/CD Pipeline
 
 GitHub Actions automatically:
 1. **CI**: Lints and syntax-checks on every push/PR
@@ -147,7 +147,7 @@ Required GitHub Secrets:
 
 ---
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 cineai/
@@ -165,18 +165,18 @@ cineai/
 
 ---
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Frontend**: Streamlit 1.35 (custom CSS dark theme)
 - **ML**: scikit-learn (TF-IDF), scipy (sparse cosine similarity)
 - **Data**: TMDB Movies Dataset (Kaggle) — 20,000+ movies
-- **Cloud**: AWS EC2 (Ubuntu 22.04, t2.micro)
+- **Cloud**: GitHub Pages (Ubuntu 22.04, t2.micro)
 - **DevOps**: GitHub Actions CI/CD, Docker
 - **Language**: Python 3.10
 
 ---
 
-## 📄 License
+##  License
 
 MIT License — free to use, modify, and distribute.
 
