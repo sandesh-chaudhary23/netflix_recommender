@@ -1,542 +1,374 @@
-"""
-CineAI v4  |  app.py
-Netflix-style Movie Recommendation System
-Cloud Project  |  Streamlit + Python + AWS
-"""
- 
-import os, re, pickle, requests, base64, io
+import streamlit as st
 import pandas as pd
 import numpy as np
-import streamlit as st
-from pathlib import Path
+import pickle
+import os
+import requests
+from PIL import Image
+from io import BytesIO
+import base64
+import random
 from dotenv import load_dotenv
- 
+
 load_dotenv()
- 
-# ══════════════════════════════════════════════════════════════════════════════════
+
+# ─── PAGE CONFIG ───────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="CineAI – Movie Discovery",
-    page_icon="🎬", layout="wide",
-    initial_sidebar_state="collapsed",
+    page_title="CineAI – Smart Movie Recommender",
+    page_icon="🎬",
+    layout="wide",
+    initial_sidebar_state="collapsed"
 )
- 
-# ── CONFIG ────────────────────────────────────────────────────────────────────────
-TMDB_KEY      = os.getenv("TMDB_API_KEY", "")
-OMDB_KEY      = os.getenv("OMDB_API_KEY", "")          # free at omdbapi.com
-TMDB_IMG_BASE = "https://image.tmdb.org/t/p/w342"      # public CDN, no key needed
- 
-ALL_GENRES = [
-    "Action","Comedy","Drama","Romance","Science Fiction",
-    "Horror","Thriller","Animation","Adventure","Crime",
-    "Fantasy","Mystery","Documentary","History","Music",
-]
-GENRE_MAP = {
-    "Action":          ["action","fight","war","battle","hero","mission","combat"],
-    "Comedy":          ["comedy","funny","laugh","humor","hilarious","satire"],
-    "Drama":           ["drama","life","family","emotion","story","struggle"],
-    "Romance":         ["romance","love","heart","passion","relationship"],
-    "Science Fiction": ["science fiction","sci-fi","space","alien","future","robot"],
-    "Horror":          ["horror","scary","ghost","dark","fear","monster"],
-    "Thriller":        ["thriller","suspense","danger","chase","conspiracy","espionage"],
-    "Animation":       ["animation","animated","cartoon","anime","pixar","disney"],
-    "Adventure":       ["adventure","journey","quest","explore","expedition"],
-    "Crime":           ["crime","heist","gangster","mafia","detective","murder"],
-    "Fantasy":         ["fantasy","magic","wizard","dragon","realm","myth"],
-    "Mystery":         ["mystery","detective","secret","clue","puzzle"],
-    "Documentary":     ["documentary","true story","history","biography"],
-    "History":         ["history","historical","period","ancient","medieval","empire"],
-    "Music":           ["music","musician","band","concert","singing","jazz","rock"],
-}
- 
-# ══════════════════════════════════════════════════════════════════════════════════
-# LOAD DATA
-# ══════════════════════════════════════════════════════════════════════════════════
-@st.cache_resource(show_spinner=False)
-def load_data():
-    for f in ["movies_clean.csv","similarity.pkl"]:
-        if not Path(f).exists():
-            st.error(f"❌ {f} not found. Run `python model.py` first.")
-            st.stop()
-    mv = pd.read_csv("movies_clean.csv")
-    mv["title"]        = mv["title"].astype(str).str.strip()
-    mv["vote_average"] = pd.to_numeric(mv.get("vote_average",0), errors="coerce").fillna(0)
-    mv["popularity"]   = pd.to_numeric(mv.get("popularity",0),   errors="coerce").fillna(0)
-    mv["vote_count"]   = pd.to_numeric(mv.get("vote_count",0),   errors="coerce").fillna(0)
-    mv["runtime"]      = pd.to_numeric(mv.get("runtime",0),      errors="coerce").fillna(0)
-    mv["year"]         = mv.get("year", pd.Series([0]*len(mv))).fillna(0).astype(int)
-    for col in ["genres_str","overview","tagline","cast_str","director_str","poster_path","keywords_str"]:
-        mv[col] = mv.get(col, pd.Series([""]*len(mv))).fillna("")
-    with open("similarity.pkl","rb") as f:
-        sim = pickle.load(f)
-    return mv.reset_index(drop=True), sim
- 
-movies, similarity = load_data()
-title_lower_map = {t.lower(): t for t in movies["title"]}
- 
-# ══════════════════════════════════════════════════════════════════════════════════
-# POSTER ENGINE  (3-tier fallback — always shows something)
-# ══════════════════════════════════════════════════════════════════════════════════
-@st.cache_data(show_spinner=False, ttl=604800)
-def fetch_tmdb_poster(title: str, year: int = 0) -> str:
-    if not TMDB_KEY: return ""
-    try:
-        p = {"api_key": TMDB_KEY, "query": title, "language":"en-US"}
-        if year: p["year"] = year
-        r = requests.get("https://api.themoviedb.org/3/search/movie", params=p, timeout=5)
-        for res in r.json().get("results",[]):
-            if res.get("poster_path"):
-                return TMDB_IMG_BASE + res["poster_path"]
-    except: pass
-    return ""
- 
-@st.cache_data(show_spinner=False, ttl=604800)
-def fetch_omdb_poster(title: str, year: int = 0) -> str:
-    """OMDb API — free tier 1000 req/day, no domain needed, just API key."""
-    if not OMDB_KEY: return ""
-    try:
-        p = {"apikey": OMDB_KEY, "t": title, "type": "movie"}
-        if year: p["y"] = year
-        r = requests.get("https://www.omdbapi.com/", params=p, timeout=5)
-        poster = r.json().get("Poster","")
-        if poster and poster != "N/A":
-            return poster
-    except: pass
-    return ""
- 
-def _svg_poster(title: str, genres: str, score: float) -> str:
-    """SVG fallback — works 100% offline, looks clean."""
-    colors = {
-        "action":"#8B0000","comedy":"#8B4500","drama":"#1a3a5c",
-        "romance":"#5c1a4a","science fiction":"#0a3d3d","horror":"#1a1a1a",
-        "thriller":"#1a2a1a","animation":"#5c3a00","adventure":"#1a4a1a",
-        "crime":"#2a2a2a","fantasy":"#3a0a5c","mystery":"#0a1a2a",
-        "documentary":"#2a3a2a","history":"#3a2a1a","music":"#3a003a",
-    }
-    g1 = (genres.lower().split()[0] if genres.strip() else "drama")
-    color = colors.get(g1, "#1a1a2e")
-    short = title[:18].replace("'","").replace('"','')
-    score_s = f"★ {score:.1f}" if score else "★ N/A"
-    svg = f"""<svg xmlns='http://www.w3.org/2000/svg' width='342' height='513'>
-  <defs>
-    <linearGradient id='g' x1='0' y1='0' x2='0' y2='1'>
-      <stop offset='0%' stop-color='{color}'/>
-      <stop offset='100%' stop-color='#050508'/>
-    </linearGradient>
-    <linearGradient id='sh' x1='0' y1='0' x2='0' y2='1'>
-      <stop offset='0%' stop-color='rgba(0,0,0,0)'/>
-      <stop offset='100%' stop-color='rgba(0,0,0,0.9)'/>
-    </linearGradient>
-  </defs>
-  <rect width='342' height='513' fill='url(#g)'/>
-  <rect width='342' height='513' fill='url(#sh)'/>
-  <text x='171' y='200' font-family='Georgia,serif' font-size='72'
-        fill='rgba(229,9,20,0.5)' text-anchor='middle'>🎬</text>
-  <rect x='20' y='380' width='302' height='1' fill='rgba(229,9,20,0.4)'/>
-  <text x='171' y='420' font-family='Arial Black,Arial,sans-serif' font-size='15'
-        font-weight='bold' fill='#ffffff' text-anchor='middle'>{short}</text>
-  <text x='171' y='448' font-family='Arial,sans-serif' font-size='14'
-        fill='#f5c518' text-anchor='middle'>{score_s}</text>
-  <text x='171' y='472' font-family='Arial,sans-serif' font-size='11'
-        fill='rgba(255,255,255,0.45)' text-anchor='middle'>{genres[:24]}</text>
-</svg>"""
-    b64 = base64.b64encode(svg.encode()).decode()
-    return f"data:image/svg+xml;base64,{b64}"
- 
-def get_poster(row) -> str:
-    title = str(row.get("title",""))
-    year  = int(row.get("year",0) or 0)
- 
-    # Tier 1: TMDB CDN from dataset poster_path (FREE, no key)
-    pp = str(row.get("poster_path","") or "").strip()
-    if pp and pp not in ("nan","None","") and pp.startswith("/"):
-        return TMDB_IMG_BASE + pp
- 
-    # Tier 2a: Live TMDB API (needs TMDB_API_KEY)
-    if TMDB_KEY:
-        url = fetch_tmdb_poster(title, year)
-        if url: return url
- 
-    # Tier 2b: OMDb API (free, needs OMDB_API_KEY, no domain restriction)
-    if OMDB_KEY:
-        url = fetch_omdb_poster(title, year)
-        if url: return url
- 
-    # Tier 3: SVG fallback (always works)
-    return _svg_poster(title, str(row.get("genres_str","") or ""),
-                       float(row.get("vote_average",0) or 0))
- 
-# ══════════════════════════════════════════════════════════════════════════════════
-# ML FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════════
-def recommend(title: str, n: int = 16) -> list:
-    mask = movies["title"].str.lower() == title.lower()
-    if not mask.any(): return []
-    idx = movies[mask].index[0]
-    row = similarity[idx]
-    if hasattr(row,"toarray"): row = row.toarray().flatten()
-    else: row = np.asarray(row).flatten()
-    pairs = sorted(enumerate(row), key=lambda x: x[1], reverse=True)[1:n+1]
-    return [movies.iloc[i].to_dict() for i,_ in pairs]
- 
-def fuzzy_search(q: str, limit: int = 12) -> list:
-    q = q.strip().lower()
-    if len(q) < 2: return []
-    exact    = [t for tl,t in title_lower_map.items() if tl == q]
-    starts   = [t for tl,t in title_lower_map.items() if tl.startswith(q) and tl != q]
-    contains = [t for tl,t in title_lower_map.items() if q in tl and not tl.startswith(q)]
-    return (exact + starts + contains)[:limit]
- 
-def get_trending(n=16):    return movies.nlargest(n,"popularity").to_dict("records")
-def get_top_rated(n=16):   return movies[movies["vote_count"]>=200].nlargest(n,"vote_average").to_dict("records")
-def get_new_releases(n=16):return movies[movies["year"]>2010].nlargest(n,"year").to_dict("records")
-def get_hidden_gems(n=16):
-    sub = movies[(movies["vote_count"]>=50)&(movies["vote_average"]>=7.5)]
-    return sub.nsmallest(n,"popularity").head(n).to_dict("records")
-def get_by_genre(genre: str, n=16) -> list:
-    kws  = GENRE_MAP.get(genre,[genre.lower()])
-    mask = movies["genres_str"].str.lower().apply(lambda g: any(k in g for k in kws))
-    sub  = movies[mask]
-    if len(sub)<n:
-        extra = movies[~mask].sample(min(n-len(sub),max(0,len(movies)-len(sub))),random_state=42)
-        sub   = pd.concat([sub,extra])
-    return sub.nlargest(n,"popularity").head(n).to_dict("records")
-def get_by_decade(decade: int, n=12):
-    sub = movies[(movies["year"]>=decade)&(movies["year"]<decade+10)]
-    return sub.nlargest(n,"vote_average").to_dict("records") if len(sub) else []
-def star_rating(s: float) -> str:
-    f = min(5,max(0,round(s/2)))
-    return "★"*f+"☆"*(5-f)
- 
-# ══════════════════════════════════════════════════════════════════════════════════
-# CSS
-# ══════════════════════════════════════════════════════════════════════════════════
+
+# ─── CUSTOM CSS ────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700&display=swap');
-:root{--red:#e50914;--rd:rgba(229,9,20,.18);--gold:#f5c518;--bg:#0a0a0f;--bg2:#141418;--bg3:#1c1c22;--txt:#e8e8ec;--dim:rgba(255,255,255,.38);--border:rgba(255,255,255,.07);}
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
-html,body,[data-testid="stAppViewContainer"],[data-testid="stMain"],.main{background:var(--bg)!important;color:var(--txt);font-family:'Inter',sans-serif;}
-[data-testid="stHeader"]{background:transparent!important;}
-[data-testid="stSidebar"]{display:none!important;}
-.block-container{padding:0!important;max-width:100%!important;}
-section[data-testid="stMain"]>div{padding:0!important;}
-::-webkit-scrollbar{width:5px;height:5px;}
-::-webkit-scrollbar-track{background:var(--bg);}
-::-webkit-scrollbar-thumb{background:var(--red);border-radius:3px;}
- 
-/* NAVBAR */
-.navbar{position:fixed;top:0;left:0;right:0;z-index:9999;display:flex;align-items:center;justify-content:space-between;padding:0 3.5rem;height:62px;background:linear-gradient(180deg,rgba(0,0,0,.98) 0%,transparent 100%);backdrop-filter:blur(14px);border-bottom:1px solid var(--border);}
-.nb-logo{font-family:'Bebas Neue',cursive;font-size:2rem;letter-spacing:.14em;color:var(--red);text-shadow:0 0 40px rgba(229,9,20,.65);}
-.nb-sub{font-size:.62rem;font-weight:300;color:rgba(255,255,255,.28);letter-spacing:.25em;margin-top:-5px;}
-.nb-links{display:flex;gap:2rem;}
-.nb-link{font-size:.82rem;font-weight:500;color:rgba(255,255,255,.5);text-decoration:none;transition:color .2s;}
-.nb-link:hover{color:#fff;}
-.nb-tag{font-size:.65rem;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--red);background:var(--rd);border:1px solid rgba(229,9,20,.35);padding:.2rem .55rem;border-radius:2px;}
- 
-/* HERO */
-.hero{position:relative;width:100%;height:80vh;min-height:480px;display:flex;align-items:flex-end;padding:0 3.5rem 4rem;overflow:hidden;margin-top:62px;background:radial-gradient(ellipse 100% 70% at 50% -5%,#200a0a 0%,var(--bg) 65%);}
-.hero-glow{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 55% 65% at 75% 20%,rgba(229,9,20,.14) 0%,transparent 70%),radial-gradient(ellipse 35% 40% at 12% 78%,rgba(80,0,150,.08) 0%,transparent 70%);}
-.hero-reel{position:absolute;right:-3%;top:0;bottom:0;width:52%;display:grid;grid-template-columns:repeat(7,1fr);gap:2px;opacity:.07;transform:skewX(-4deg);overflow:hidden;pointer-events:none;}
-.hero-cell{background:var(--red);animation:rpulse 5s ease-in-out infinite;}
-.hero-cell:nth-child(3n){background:#7a0000;animation-delay:1.5s;}
-.hero-cell:nth-child(7n){background:#ff4444;animation-delay:3s;}
-@keyframes rpulse{0%,100%{opacity:1}50%{opacity:.2}}
-.hero-content{position:relative;z-index:2;max-width:580px;}
-.hero-eyebrow{display:inline-flex;align-items:center;gap:.45rem;font-size:.62rem;font-weight:700;letter-spacing:.24em;text-transform:uppercase;color:var(--red);background:var(--rd);border:1px solid rgba(229,9,20,.3);padding:.22rem .7rem;border-radius:2px;margin-bottom:.9rem;}
-.hero-title{font-family:'Bebas Neue',cursive;font-size:clamp(3.2rem,6.5vw,5.5rem);line-height:.92;letter-spacing:.02em;color:#fff;text-shadow:0 10px 80px rgba(0,0,0,.98);margin-bottom:.95rem;}
-.hero-title em{color:var(--red);font-style:normal;}
-.hero-desc{font-size:.9rem;font-weight:300;line-height:1.72;color:rgba(255,255,255,.43);margin-bottom:2rem;}
-.hero-stats{display:flex;gap:2.8rem;}
-.stat-n{font-family:'Bebas Neue',cursive;font-size:1.7rem;color:var(--red);line-height:1;}
-.stat-l{font-size:.6rem;color:rgba(255,255,255,.26);letter-spacing:.14em;text-transform:uppercase;}
- 
-/* SEARCH */
-.search-section{padding:1.6rem 3.5rem 1.4rem;background:rgba(0,0,0,.45);border-top:1px solid var(--border);border-bottom:1px solid var(--border);}
-.search-label{font-family:'Bebas Neue',cursive;font-size:.9rem;letter-spacing:.22em;color:rgba(255,255,255,.28);margin-bottom:.55rem;}
- 
-/* Widget overrides */
-div[data-testid="stTextInput"] input{background:rgba(255,255,255,.07)!important;border:1.5px solid rgba(255,255,255,.1)!important;border-radius:5px!important;color:#fff!important;font-family:'Inter',sans-serif!important;font-size:.95rem!important;padding:.72rem 1rem!important;caret-color:var(--red);}
-div[data-testid="stTextInput"] input:focus{border-color:rgba(229,9,20,.55)!important;box-shadow:0 0 0 3px rgba(229,9,20,.1)!important;outline:none!important;}
-div[data-testid="stTextInput"]>label{display:none!important;}
-div[data-testid="stSelectbox"]>div>div{background:rgba(255,255,255,.07)!important;border:1.5px solid rgba(255,255,255,.1)!important;border-radius:5px!important;color:#fff!important;font-family:'Inter',sans-serif!important;font-size:.88rem!important;}
-div[data-testid="stSelectbox"] svg{fill:rgba(255,255,255,.3)!important;}
-div[data-testid="stSelectbox"] label{color:rgba(255,255,255,.38)!important;font-size:.75rem!important;}
-div[data-testid="stTabs"] button{font-family:'Bebas Neue',cursive!important;letter-spacing:.12em!important;font-size:.9rem!important;color:rgba(255,255,255,.45)!important;}
-div[data-testid="stTabs"] button[aria-selected="true"]{color:#fff!important;}
-div[data-testid="stTabs"] [data-baseweb="tab-highlight"]{background:var(--red)!important;}
-div[data-testid="stTabs"] [data-baseweb="tab-border"]{background:var(--border)!important;}
-.stButton>button{background:var(--red)!important;color:#fff!important;border:none!important;border-radius:4px!important;font-family:'Inter',sans-serif!important;font-size:.85rem!important;font-weight:700!important;letter-spacing:.07em!important;padding:.72rem 1.6rem!important;width:100%!important;transition:background .2s,transform .15s!important;}
-.stButton>button:hover{background:#b81d24!important;transform:translateY(-1px)!important;}
- 
-/* REC BANNER */
-.rec-banner{margin:1.5rem 3.5rem;padding:1.4rem 2rem;background:linear-gradient(135deg,rgba(229,9,20,.1),rgba(80,0,30,.08));border:1px solid rgba(229,9,20,.22);border-radius:7px;display:flex;align-items:center;gap:1.4rem;}
-.rec-icon{font-size:2rem;}
-.rec-title{font-family:'Bebas Neue',cursive;font-size:1.15rem;color:#fff;letter-spacing:.06em;}
-.rec-sub{font-size:.76rem;color:rgba(255,255,255,.36);margin-top:.1rem;}
- 
-/* ROW */
-.row-section{padding:1.6rem 3.5rem;}
-.row-hd{display:flex;align-items:baseline;gap:.75rem;margin-bottom:1rem;}
-.row-ttl{font-family:'Bebas Neue',cursive;font-size:1.3rem;letter-spacing:.07em;color:#fff;}
-.pill{font-size:.58rem;font-weight:700;letter-spacing:.18em;text-transform:uppercase;padding:.15rem .5rem;border-radius:2px;}
-.pill-red{background:rgba(229,9,20,.18);color:var(--red);border:1px solid rgba(229,9,20,.35);}
-.pill-gold{background:rgba(245,197,24,.13);color:var(--gold);border:1px solid rgba(245,197,24,.3);}
-.pill-blue{background:rgba(0,145,255,.13);color:#0091ff;border:1px solid rgba(0,145,255,.28);}
-.pill-teal{background:rgba(0,200,160,.13);color:#00c8a0;border:1px solid rgba(0,200,160,.28);}
-.pill-purple{background:rgba(160,0,255,.13);color:#a000ff;border:1px solid rgba(160,0,255,.28);}
-.pill-pink{background:rgba(255,60,130,.13);color:#ff3c82;border:1px solid rgba(255,60,130,.28);}
- 
-/* MOVIE GRID */
-.mgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:.9rem;}
-.mcard{position:relative;border-radius:6px;overflow:hidden;background:var(--bg3);cursor:pointer;aspect-ratio:2/3;transition:transform .3s cubic-bezier(.34,1.56,.64,1),box-shadow .3s;}
-.mcard:hover{transform:scale(1.08) translateY(-7px);box-shadow:0 30px 80px rgba(0,0,0,.92),0 0 0 2px rgba(229,9,20,.45);z-index:30;}
-.mcard img{width:100%;height:100%;object-fit:cover;display:block;background:var(--bg3);transition:filter .3s;}
-.mcard:hover img{filter:brightness(.45);}
-.mcard-overlay{position:absolute;inset:0;background:linear-gradient(0deg,rgba(0,0,0,.97) 0%,rgba(0,0,0,.15) 55%,transparent 100%);display:flex;flex-direction:column;justify-content:flex-end;padding:.7rem .65rem;opacity:0;transition:opacity .3s;}
-.mcard:hover .mcard-overlay{opacity:1;}
-.mcard-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-55%) scale(.7);width:44px;height:44px;border-radius:50%;background:rgba(229,9,20,.85);display:flex;align-items:center;justify-content:center;font-size:1.1rem;opacity:0;transition:opacity .3s,transform .3s;}
-.mcard:hover .mcard-play{opacity:1;transform:translate(-50%,-55%) scale(1);}
-.mcard-title{font-size:.75rem;font-weight:600;color:#fff;line-height:1.25;margin-bottom:.16rem;}
-.mcard-stars{font-size:.66rem;color:var(--gold);margin-top:.08rem;}
-.mcard-meta{font-size:.62rem;color:rgba(255,255,255,.4);margin-top:.1rem;}
-.mcard-genre{display:inline-block;margin-top:.18rem;font-size:.58rem;font-weight:600;letter-spacing:.1em;text-transform:uppercase;color:var(--red);background:rgba(229,9,20,.15);padding:.05rem .3rem;border-radius:2px;}
-.mcard-badge{position:absolute;top:.4rem;left:.4rem;font-family:'Bebas Neue',cursive;font-size:.78rem;color:#fff;background:rgba(229,9,20,.88);padding:.07rem .32rem;border-radius:2px;}
-.mcard-score{position:absolute;top:.4rem;right:.4rem;font-size:.64rem;font-weight:700;background:rgba(0,0,0,.8);color:var(--gold);padding:.07rem .3rem;border-radius:2px;}
-.mcard-new{position:absolute;top:.4rem;right:.4rem;font-size:.58rem;font-weight:700;background:#00c850;color:#000;padding:.07rem .3rem;border-radius:2px;letter-spacing:.06em;}
- 
-/* DETAIL CARD */
-.detail-card{margin:1.5rem 3.5rem;padding:2rem;background:linear-gradient(135deg,var(--bg2),var(--bg3));border:1px solid var(--border);border-radius:8px;display:flex;gap:2rem;}
-.detail-poster{flex-shrink:0;width:160px;border-radius:5px;overflow:hidden;}
-.detail-poster img{width:100%;display:block;}
-.detail-title{font-family:'Bebas Neue',cursive;font-size:1.6rem;color:#fff;letter-spacing:.04em;margin-bottom:.3rem;}
-.detail-tagline{font-size:.82rem;font-style:italic;color:rgba(255,255,255,.35);margin-bottom:.8rem;}
-.detail-meta{display:flex;gap:1.5rem;margin-bottom:.9rem;flex-wrap:wrap;}
-.detail-meta-item{font-size:.75rem;color:rgba(255,255,255,.45);}
-.detail-meta-item b{color:#fff;font-weight:600;}
-.detail-overview{font-size:.84rem;line-height:1.7;color:rgba(255,255,255,.55);}
-.detail-cast{font-size:.76rem;color:rgba(255,255,255,.4);margin-top:.6rem;}
-.detail-cast b{color:rgba(255,255,255,.65);}
- 
-/* GENRE TABS */
-.g-tabs{display:flex;gap:.45rem;flex-wrap:wrap;margin-bottom:1rem;}
-.g-tab{font-size:.7rem;font-weight:500;padding:.3rem .85rem;border-radius:3px;border:1px solid var(--border);background:rgba(255,255,255,.04);color:rgba(255,255,255,.48);}
-.g-tab.active{background:rgba(229,9,20,.16);border-color:rgba(229,9,20,.42);color:var(--red);}
- 
-/* DIVIDER */
-.hdiv{height:1px;margin:0 3.5rem;background:linear-gradient(90deg,transparent,rgba(255,255,255,.06),transparent);}
- 
-/* FOOTER */
-.footer{margin-top:4rem;padding:2rem 3.5rem;border-top:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:1rem;}
-.f-logo{font-family:'Bebas Neue',cursive;font-size:1.3rem;color:var(--red);letter-spacing:.1em;}
-.f-links{display:flex;gap:1.5rem;}
-.f-link{font-size:.72rem;color:rgba(255,255,255,.3);text-decoration:none;}
-.f-link:hover{color:rgba(255,255,255,.6);}
-.f-txt{font-size:.68rem;color:rgba(255,255,255,.18);}
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Roboto:wght@300;400;700&display=swap');
+
+/* Dark Netflix-like theme */
+body, .stApp { background-color: #141414; color: #e5e5e5; }
+.stApp { font-family: 'Roboto', sans-serif; }
+
+/* Hide streamlit elements */
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding-top: 0rem; }
+
+/* Hero */
+.hero { background: linear-gradient(135deg, #000000 0%, #1a0000 40%, #141414 100%);
+        padding: 60px 40px; text-align: center; border-bottom: 3px solid #e50914; }
+.hero-title { font-family: 'Bebas Neue', cursive; font-size: 5rem; color: #e50914;
+              letter-spacing: 6px; text-shadow: 0 0 30px rgba(229,9,20,0.5); margin: 0; }
+.hero-sub { font-size: 1.3rem; color: #b3b3b3; margin-top: 10px; }
+.film-reel { font-size: 3rem; animation: spin 4s linear infinite; display: inline-block; }
+@keyframes spin { 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
+
+/* Cards */
+.movie-card { background: #1f1f1f; border-radius: 8px; overflow: hidden;
+              transition: transform .3s, box-shadow .3s; cursor: pointer; }
+.movie-card:hover { transform: scale(1.04); box-shadow: 0 8px 30px rgba(229,9,20,0.3); }
+
+/* Badges */
+.badge { display: inline-block; background: #e50914; color: white; padding: 2px 10px;
+         border-radius: 12px; font-size: 0.75rem; font-weight: 700; }
+.badge-gold { background: #f5c518; color: #000; }
+
+/* Section title */
+.section-title { font-family: 'Bebas Neue', cursive; font-size: 2rem; color: #e5e5e5;
+                 letter-spacing: 3px; border-left: 4px solid #e50914; padding-left: 12px;
+                 margin: 30px 0 15px 0; }
+
+/* Tabs */
+.stTabs [data-baseweb="tab-list"] { background: #1f1f1f; border-radius: 8px; }
+.stTabs [data-baseweb="tab"] { color: #b3b3b3; }
+.stTabs [aria-selected="true"] { color: #e50914 !important; border-bottom-color: #e50914 !important; }
+
+/* Search box */
+.stTextInput input { background: #2d2d2d; color: #e5e5e5; border: 2px solid #333;
+                     border-radius: 6px; font-size: 1.1rem; }
+.stTextInput input:focus { border-color: #e50914; }
+
+/* Selectbox */
+.stSelectbox select { background: #2d2d2d; color: #e5e5e5; }
+
+/* Rating stars */
+.rating { color: #f5c518; font-size: 1rem; }
+
+/* Detail card */
+.detail-card { background: linear-gradient(135deg, #1a0000, #1f1f1f);
+               border: 1px solid #333; border-radius: 12px; padding: 24px;
+               border-left: 4px solid #e50914; }
+
+/* Metric cards */
+.metric-box { background: #1f1f1f; border-radius: 8px; padding: 16px; text-align: center;
+              border-top: 3px solid #e50914; }
+.metric-val { font-size: 2rem; font-weight: 700; color: #e50914; }
+.metric-label { font-size: 0.85rem; color: #b3b3b3; }
+
+button[kind="primary"] { background: #e50914 !important; border-color: #e50914 !important; }
+
+/* SVG poster style */
+.svg-poster { border-radius: 6px; overflow: hidden; }
 </style>
 """, unsafe_allow_html=True)
- 
-# ── SESSION STATE ─────────────────────────────────────────────────────────────────
-for k,v in dict(sel_movie=None,sel_genre="Action",query="",sugg=[],recs=[],detail=None,decade=2000).items():
-    if k not in st.session_state: st.session_state[k]=v
- 
-# ── NAVBAR ────────────────────────────────────────────────────────────────────────
+
+# ─── API KEYS ──────────────────────────────────────────────────────────────────
+TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
+OMDB_API_KEY = os.getenv("OMDB_API_KEY", "")
+TMDB_CDN = "https://image.tmdb.org/t/p/w342"
+
+# ─── LOAD DATA ─────────────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False)
+def load_data():
+    try:
+        df = pd.read_csv("movies_clean.csv")
+        with open("similarity.pkl", "rb") as f:
+            sim = pickle.load(f)
+        return df, sim
+    except FileNotFoundError:
+        st.error("❌ Run `python model.py` first to generate movies_clean.csv and similarity.pkl")
+        st.stop()
+
+df, similarity = load_data()
+
+# ─── POSTER SYSTEM ─────────────────────────────────────────────────────────────
+def generate_svg_poster(title, year="", rating=""):
+    colors = ["#e50914","#1a3a5c","#1a4a1a","#4a1a4a","#4a3a1a"]
+    color = colors[hash(title) % len(colors)]
+    short = title[:2].upper() if title else "??"
+    year_str = str(year)[:4] if year else ""
+    svg = f"""<svg width="150" height="225" xmlns="http://www.w3.org/2000/svg">
+  <defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+    <stop offset="0%" stop-color="{color}"/><stop offset="100%" stop-color="#141414"/>
+  </linearGradient></defs>
+  <rect width="150" height="225" fill="url(#g)" rx="6"/>
+  <text x="75" y="95" font-family="Arial" font-size="38" font-weight="bold"
+        fill="white" text-anchor="middle" opacity="0.9">{short}</text>
+  <text x="75" y="145" font-family="Arial" font-size="11" fill="#ccc"
+        text-anchor="middle">{title[:22]}</text>
+  <text x="75" y="165" font-family="Arial" font-size="10" fill="#999"
+        text-anchor="middle">{year_str}</text>
+  <rect x="20" y="185" width="110" height="2" fill="{color}" opacity="0.6"/>
+  <text x="75" y="210" font-family="Arial" font-size="9" fill="#aaa"
+        text-anchor="middle">🎬 CineAI</text>
+</svg>"""
+    return f"data:image/svg+xml;base64,{base64.b64encode(svg.encode()).decode()}"
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_poster(poster_path, title, year="", tmdb_id=None, rating=""):
+    # Tier 1: TMDB CDN from CSV
+    if poster_path and str(poster_path) != "nan" and str(poster_path).strip():
+        url = f"{TMDB_CDN}{poster_path}"
+        try:
+            r = requests.get(url, timeout=4)
+            if r.status_code == 200:
+                return url
+        except:
+            pass
+
+    # Tier 2a: Live TMDB API
+    if TMDB_API_KEY and tmdb_id:
+        try:
+            url = f"https://api.themoviedb.org/3/movie/{tmdb_id}?api_key={TMDB_API_KEY}"
+            r = requests.get(url, timeout=4)
+            if r.status_code == 200:
+                path = r.json().get("poster_path")
+                if path:
+                    return f"{TMDB_CDN}{path}"
+        except:
+            pass
+
+    # Tier 2b: OMDb
+    if OMDB_API_KEY:
+        try:
+            yr = str(year)[:4] if year else ""
+            url = f"http://www.omdbapi.com/?t={requests.utils.quote(str(title))}&y={yr}&apikey={OMDB_API_KEY}"
+            r = requests.get(url, timeout=4)
+            if r.status_code == 200:
+                poster = r.json().get("Poster")
+                if poster and poster != "N/A":
+                    return poster
+        except:
+            pass
+
+    # Tier 3: SVG fallback
+    return generate_svg_poster(str(title), str(year)[:4] if year else "", rating)
+
+def show_poster(poster_path, title, year="", tmdb_id=None, rating="", width=150):
+    src = get_poster(poster_path, title, year, tmdb_id, rating)
+    if src.startswith("data:image/svg"):
+        st.markdown(f'<img src="{src}" width="{width}" style="border-radius:6px"/>', unsafe_allow_html=True)
+    else:
+        try:
+            st.image(src, width=width)
+        except:
+            st.markdown(f'<img src="{generate_svg_poster(title,year,rating)}" width="{width}" style="border-radius:6px"/>', unsafe_allow_html=True)
+
+# ─── SEARCH FUNCTIONS ──────────────────────────────────────────────────────────
+def fuzzy_search(query, df, n=10):
+    query = query.strip().lower()
+    titles = df['title'].fillna('').str.lower()
+    # Tier 1: exact
+    exact = df[titles == query]
+    if not exact.empty:
+        return exact.head(n)
+    # Tier 2: prefix
+    prefix = df[titles.str.startswith(query)]
+    if not prefix.empty:
+        return prefix.head(n)
+    # Tier 3: contains
+    contains = df[titles.str.contains(query, na=False)]
+    return contains.head(n)
+
+def get_recommendations(title, df, similarity, n=10):
+    matches = df[df['title'].str.lower() == title.strip().lower()]
+    if matches.empty:
+        matches = df[df['title'].str.lower().str.contains(title.strip().lower(), na=False)]
+    if matches.empty:
+        return pd.DataFrame()
+    idx = matches.index[0]
+    # Handle both dense and sparse similarity matrices
+    try:
+        sim_row = similarity[idx]
+        if hasattr(sim_row, 'toarray'):
+            sim_row = sim_row.toarray().flatten()
+        scores = list(enumerate(sim_row))
+    except:
+        return pd.DataFrame()
+    scores = sorted(scores, key=lambda x: x[1], reverse=True)[1:n+1]
+    indices = [i[0] for i in scores]
+    return df.iloc[indices].copy()
+
+# ─── STAR RATING ───────────────────────────────────────────────────────────────
+def star_rating(score):
+    stars = round(score / 2)
+    return "★" * stars + "☆" * (5 - stars)
+
+# ─── HERO SECTION ──────────────────────────────────────────────────────────────
 st.markdown("""
-<div class="navbar">
-  <div><div class="nb-logo">🎬 CineAI</div><div class="nb-sub">INTELLIGENT MOVIE DISCOVERY</div></div>
-  <div class="nb-links">
-    <a class="nb-link" href="#">Home</a>
-    <a class="nb-link" href="#">Trending</a>
-    <a class="nb-link" href="#">Top Rated</a>
-    <a class="nb-link" href="#">Genres</a>
-  </div>
-  <span class="nb-tag">ML POWERED</span>
-</div>
-""", unsafe_allow_html=True)
- 
-# ── HERO ──────────────────────────────────────────────────────────────────────────
-cells="".join(['<div class="hero-cell"></div>']*84)
-st.markdown(f"""
 <div class="hero">
-  <div class="hero-glow"></div>
-  <div class="hero-reel">{cells}</div>
-  <div class="hero-content">
-    <div class="hero-eyebrow">🧠 TF-IDF · Cosine Similarity · TMDB Dataset</div>
-    <div class="hero-title">DISCOVER<br>YOUR NEXT<br><em>OBSESSION.</em></div>
-    <div class="hero-desc">Real ML engine · {len(movies):,} movies · Partial search · Instant recommendations</div>
-    <div class="hero-stats">
-      <div><div class="stat-n">{len(movies):,}</div><div class="stat-l">Movies</div></div>
-      <div><div class="stat-n">{len(ALL_GENRES)}</div><div class="stat-l">Genres</div></div>
-      <div><div class="stat-n">8K</div><div class="stat-l">Features</div></div>
-      <div><div class="stat-n">AWS</div><div class="stat-l">Cloud</div></div>
-    </div>
-  </div>
+  <div class="film-reel">🎬</div>
+  <div class="hero-title">CineAI</div>
+  <div class="hero-sub">Your AI-Powered Netflix-Style Movie Recommender · 20,000+ Movies · Powered by TF-IDF + Cosine Similarity</div>
 </div>
 """, unsafe_allow_html=True)
- 
-# ── SEARCH ────────────────────────────────────────────────────────────────────────
-st.markdown('<div class="search-section"><div class="search-label">🔍 SEARCH ANY MOVIE · GET INSTANT AI RECOMMENDATIONS</div>', unsafe_allow_html=True)
-c1,c2 = st.columns([5,1])
-with c1:
-    raw_q = st.text_input("_", value=st.session_state.query,
-        placeholder="Type movie name — e.g.  spider,  inception,  dark knight …",
-        label_visibility="collapsed", key="qbox")
-with c2:
-    st.markdown("<div style='height:3px'></div>", unsafe_allow_html=True)
-    go = st.button("🔍 Search")
- 
-if raw_q != st.session_state.query:
-    st.session_state.query = raw_q
-    st.session_state.sugg  = fuzzy_search(raw_q) if len(raw_q.strip())>=2 else []
-if go and len(raw_q.strip())>=2:
-    st.session_state.sugg = fuzzy_search(raw_q)
- 
-if st.session_state.sugg:
-    opts   = ["— select to get recommendations —"]+st.session_state.sugg
-    picked = st.selectbox("Search Results:", opts, key="pick_box")
-    if picked != opts[0] and picked != st.session_state.sel_movie:
-        st.session_state.sel_movie = picked
-        st.session_state.recs      = recommend(picked,16)
-        m = movies[movies["title"].str.lower()==picked.lower()]
-        if len(m): st.session_state.detail = m.iloc[0].to_dict()
-elif raw_q.strip() and len(raw_q.strip())>=2 and go:
-    st.markdown(f'<p style="color:rgba(255,255,255,.35);font-size:.82rem;padding:.4rem 0">No results for "<b style="color:#e50914">{raw_q}</b>". Try: <b>spider</b>, <b>batman</b>, <b>avatar</b>, <b>toy story</b>.</p>', unsafe_allow_html=True)
-st.markdown("</div>", unsafe_allow_html=True)
- 
-# ── CARD RENDERER ─────────────────────────────────────────────────────────────────
-def render_row(records:list, badge_fn=None, show_new=False):
-    if not records: return
-    cards=""
-    for i,row in enumerate(records):
-        poster  = get_poster(row)
-        score   = float(row.get("vote_average",0) or 0)
-        year    = int(row.get("year",0) or 0)
-        title   = str(row["title"])
-        short   = title[:22]+("…" if len(title)>22 else "")
-        genres  = str(row.get("genres_str","") or "").split()
-        g_tag   = genres[0] if genres else ""
-        runtime = int(row.get("runtime",0) or 0)
-        badge   = badge_fn(i) if badge_fn else ""
-        sc_b    = f'<div class="mcard-score">★ {score:.1f}</div>' if score and not show_new else ""
-        new_b   = '<div class="mcard-new">NEW</div>' if show_new and not badge_fn else ""
-        meta    = " · ".join(p for p in [str(year) if year else "",f"{runtime}m" if runtime else ""] if p)
-        cards  += f"""
-        <div class="mcard">
-          <img src="{poster}" alt="{title}" loading="lazy">
-          <div class="mcard-play">▶</div>
-          {badge}{new_b}{sc_b}
-          <div class="mcard-overlay">
-            <div class="mcard-title">{short}</div>
-            <div class="mcard-stars">{star_rating(score)} {score:.1f}</div>
-            <div class="mcard-meta">{meta}</div>
-            <div class="mcard-genre">{g_tag}</div>
-          </div>
-        </div>"""
-    st.markdown(f'<div class="mgrid">{cards}</div>', unsafe_allow_html=True)
- 
-# ── DETAIL CARD ───────────────────────────────────────────────────────────────────
-if st.session_state.detail:
-    d       = st.session_state.detail
-    poster  = get_poster(d)
-    score   = float(d.get("vote_average",0) or 0)
-    year    = int(d.get("year",0) or 0)
-    runtime = int(d.get("runtime",0) or 0)
-    cast    = str(d.get("cast_str","") or "").replace("_"," ")[:120]
-    director= str(d.get("director_str","") or "").replace("_"," ")
-    tagline = str(d.get("tagline","") or "")
-    overview= str(d.get("overview","") or "")[:380]
-    genres  = str(d.get("genres_str","") or "")
-    st.markdown(f"""
-    <div class="detail-card">
-      <div class="detail-poster"><img src="{poster}" alt="{d['title']}"></div>
-      <div>
-        <div class="detail-title">{d['title']}</div>
-        {f'<div class="detail-tagline">"{tagline}"</div>' if tagline else ''}
-        <div class="detail-meta">
-          <div class="detail-meta-item"><b>⭐ {score:.1f}</b> / 10</div>
-          {f'<div class="detail-meta-item"><b>{year}</b></div>' if year else ''}
-          {f'<div class="detail-meta-item"><b>{runtime}m</b></div>' if runtime else ''}
-          <div class="detail-meta-item">{genres}</div>
-        </div>
-        {f'<div class="detail-overview">{overview}…</div>' if overview else ''}
-        {f'<div class="detail-cast"><b>Director:</b> {director}</div>' if director else ''}
-        {f'<div class="detail-cast"><b>Cast:</b> {cast}</div>' if cast else ''}
-      </div>
-    </div>""", unsafe_allow_html=True)
- 
-# ── RECOMMENDATIONS ───────────────────────────────────────────────────────────────
-if st.session_state.sel_movie and st.session_state.recs:
-    sel=st.session_state.sel_movie
-    st.markdown(f"""
-    <div class="rec-banner">
-      <div class="rec-icon">🎯</div>
-      <div>
-        <div class="rec-title">Because You Selected: "{sel}"</div>
-        <div class="rec-sub">ML matched {len(st.session_state.recs)} films · TF-IDF cosine similarity on genres · keywords · director · overview</div>
-      </div>
-    </div>""", unsafe_allow_html=True)
-    st.markdown('<div class="row-section"><div class="row-hd"><div class="row-ttl">🎯 Recommended For You</div><span class="pill pill-red">AI MATCH</span></div>', unsafe_allow_html=True)
-    render_row(st.session_state.recs, badge_fn=lambda i: f'<div class="mcard-badge">#{i+1}</div>')
-    st.markdown("</div>", unsafe_allow_html=True)
-    st.markdown('<div class="hdiv"></div>', unsafe_allow_html=True)
- 
-# ── TABS ──────────────────────────────────────────────────────────────────────────
-tab1,tab2,tab3,tab4,tab5 = st.tabs(["🔥  TRENDING","⭐  TOP RATED","🎭  BY GENRE","🆕  NEW RELEASES","💎  HIDDEN GEMS"])
- 
+
+# ─── SEARCH SECTION ────────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">🔍 Smart Search</div>', unsafe_allow_html=True)
+col_search, col_btn = st.columns([5, 1])
+with col_search:
+    query = st.text_input("", placeholder="Search any movie... (e.g. Inception, Dark Knight, Interstellar)", label_visibility="collapsed")
+with col_btn:
+    st.markdown("<br>", unsafe_allow_html=True)
+    search_clicked = st.button("Search 🔎", use_container_width=True)
+
+selected_movie = None
+
+if query:
+    results = fuzzy_search(query, df)
+    if not results.empty:
+        titles_list = results['title'].tolist()
+        selected_movie = st.selectbox("Select a movie:", titles_list, label_visibility="collapsed")
+    else:
+        st.warning("No movies found. Try a different title.")
+
+# ─── MOVIE DETAIL + RECOMMENDATIONS ───────────────────────────────────────────
+if selected_movie:
+    movie_row = df[df['title'] == selected_movie].iloc[0]
+
+    st.markdown('<div class="section-title">🎥 Movie Details</div>', unsafe_allow_html=True)
+
+    col_img, col_info = st.columns([1, 3])
+    with col_img:
+        show_poster(
+            movie_row.get('poster_path'),
+            movie_row['title'],
+            movie_row.get('release_date', '')[:4] if pd.notna(movie_row.get('release_date', '')) else '',
+            movie_row.get('id'),
+            str(movie_row.get('vote_average', '')),
+            width=200
+        )
+
+    with col_info:
+        st.markdown(f'<div class="detail-card">', unsafe_allow_html=True)
+        rating = movie_row.get('vote_average', 0)
+        year = str(movie_row.get('release_date', ''))[:4]
+        genres_raw = movie_row.get('genres', '')
+        st.markdown(f"### {movie_row['title']} ({year})")
+        st.markdown(f'<span class="rating">{star_rating(float(rating) if rating else 0)}</span> **{rating}/10** · <span class="badge">{genres_raw[:40] if genres_raw else "N/A"}</span>', unsafe_allow_html=True)
+
+        tagline = movie_row.get('tagline', '')
+        if tagline and str(tagline) != 'nan':
+            st.markdown(f'*"{tagline}"*')
+
+        overview = movie_row.get('overview', '')
+        if overview and str(overview) != 'nan':
+            st.markdown(f"**Synopsis:** {str(overview)[:400]}...")
+
+        cast = movie_row.get('cast', '')
+        director = movie_row.get('director', '')
+        if cast and str(cast) != 'nan':
+            st.markdown(f"🎭 **Cast:** {str(cast)[:100]}")
+        if director and str(director) != 'nan':
+            st.markdown(f"🎬 **Director:** {director}")
+
+        votes = movie_row.get('vote_count', 0)
+        popularity = movie_row.get('popularity', 0)
+        st.markdown(f"👥 **Votes:** {int(votes):,} · 📈 **Popularity:** {float(popularity):.1f}")
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # AI Recommendations
+    st.markdown('<div class="section-title">🤖 AI Recommendations</div>', unsafe_allow_html=True)
+    recs = get_recommendations(selected_movie, df, similarity, n=10)
+
+    if not recs.empty:
+        cols = st.columns(5)
+        for i, (_, row) in enumerate(recs.head(10).iterrows()):
+            with cols[i % 5]:
+                year_r = str(row.get('release_date', ''))[:4]
+                rating_r = row.get('vote_average', 0)
+                show_poster(row.get('poster_path'), row['title'], year_r, row.get('id'), str(rating_r), width=140)
+                st.markdown(f"**{str(row['title'])[:22]}**")
+                st.markdown(f'<span class="rating">{star_rating(float(rating_r) if rating_r else 0)}</span> {rating_r}', unsafe_allow_html=True)
+    else:
+        st.info("No recommendations found for this title.")
+
+# ─── BROWSE SECTIONS ───────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">🎭 Explore Movies</div>', unsafe_allow_html=True)
+
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔥 Trending Now", "⭐ Top Rated", "🎭 By Genre", "🆕 New Releases", "💎 Hidden Gems"])
+
+def show_movie_row(movies_df, n=10):
+    cols = st.columns(5)
+    for i, (_, row) in enumerate(movies_df.head(n).iterrows()):
+        with cols[i % 5]:
+            year_r = str(row.get('release_date', ''))[:4]
+            rating_r = row.get('vote_average', 0)
+            show_poster(row.get('poster_path'), row['title'], year_r, row.get('id'), str(rating_r), width=140)
+            st.markdown(f"**{str(row['title'])[:22]}**")
+            st.markdown(f'⭐ {rating_r} · {year_r}')
+
 with tab1:
-    st.markdown('<div class="row-section"><div class="row-hd"><div class="row-ttl">🔥 Trending Now</div><span class="pill pill-red">LIVE POPULARITY</span></div>', unsafe_allow_html=True)
-    render_row(get_trending(16), badge_fn=lambda i: f'<div class="mcard-badge">#{i+1}</div>')
-    st.markdown("</div>", unsafe_allow_html=True)
- 
+    trending = df.sort_values('popularity', ascending=False).head(10)
+    show_movie_row(trending)
+
 with tab2:
-    st.markdown('<div class="row-section"><div class="row-hd"><div class="row-ttl">⭐ Critically Acclaimed</div><span class="pill pill-gold">≥200 VOTES</span></div>', unsafe_allow_html=True)
-    render_row(get_top_rated(16))
-    st.markdown("</div>", unsafe_allow_html=True)
- 
+    top_rated = df[df['vote_count'] >= 200].sort_values('vote_average', ascending=False).head(10)
+    show_movie_row(top_rated)
+
 with tab3:
-    st.markdown('<div class="row-section">', unsafe_allow_html=True)
-    tabs_html="".join(f'<div class="g-tab {"active" if g==st.session_state.sel_genre else ""}">{g}</div>' for g in ALL_GENRES)
-    st.markdown(f'<div class="g-tabs">{tabs_html}</div>', unsafe_allow_html=True)
-    sel_genre=st.selectbox("Genre",ALL_GENRES,index=ALL_GENRES.index(st.session_state.sel_genre),label_visibility="visible",key="genre_sel")
-    st.session_state.sel_genre=sel_genre
-    st.markdown(f'<div class="row-hd" style="margin-top:.8rem"><div class="row-ttl">🎭 {sel_genre}</div><span class="pill pill-blue">GENRE MATCH</span></div>', unsafe_allow_html=True)
-    render_row(get_by_genre(sel_genre,16))
-    st.markdown("</div>", unsafe_allow_html=True)
- 
+    GENRES = ['Action','Comedy','Drama','Horror','Sci-Fi','Romance','Thriller',
+              'Animation','Adventure','Crime','Fantasy','Documentary','Mystery','Family','History']
+    genre_choice = st.selectbox("Choose Genre:", GENRES)
+    genre_movies = df[df['genres'].str.contains(genre_choice, case=False, na=False)].sort_values('popularity', ascending=False).head(10)
+    show_movie_row(genre_movies)
+
 with tab4:
-    st.markdown('<div class="row-section"><div class="row-hd"><div class="row-ttl">🆕 New Releases</div><span class="pill pill-teal">POST-2010</span></div>', unsafe_allow_html=True)
-    render_row(get_new_releases(16),show_new=True)
-    st.markdown("</div>", unsafe_allow_html=True)
- 
+    new_movies = df[df['release_date'].str[:4] >= '2010'].sort_values('release_date', ascending=False).head(10)
+    show_movie_row(new_movies)
+
 with tab5:
-    st.markdown('<div class="row-section"><div class="row-hd"><div class="row-ttl">💎 Hidden Gems</div><span class="pill pill-purple">HIGH RATING · LOW HYPE</span></div><p style="font-size:.78rem;color:rgba(255,255,255,.35);margin-bottom:.9rem">Highly rated films most people haven\'t discovered yet.</p>', unsafe_allow_html=True)
-    render_row(get_hidden_gems(16))
-    st.markdown("</div>", unsafe_allow_html=True)
- 
-# ── BY DECADE ─────────────────────────────────────────────────────────────────────
-st.markdown('<div class="hdiv"></div>', unsafe_allow_html=True)
-st.markdown('<div class="row-section"><div class="row-hd"><div class="row-ttl">🕰 Browse By Decade</div><span class="pill pill-pink">TIME TRAVEL</span></div>', unsafe_allow_html=True)
-decades=[1970,1980,1990,2000,2010,2020]
-dec_cols=st.columns(len(decades))
-for col,d in zip(dec_cols,decades):
-    with col:
-        if st.button(f"{d}s",key=f"dec_{d}"): st.session_state.decade=d
-dm=get_by_decade(st.session_state.decade,12)
-if dm:
-    st.markdown(f'<div class="row-hd" style="margin-top:.8rem"><div class="row-ttl">Best of the {st.session_state.decade}s</div></div>', unsafe_allow_html=True)
-    render_row(dm)
-st.markdown("</div>", unsafe_allow_html=True)
- 
-# ── FOOTER ────────────────────────────────────────────────────────────────────────
-st.markdown(f"""
-<div class="footer">
-  <div><div class="f-logo">🎬 CineAI</div><div class="f-txt" style="margin-top:.3rem">Content-Based ML · TF-IDF · Cosine Similarity · AWS EC2</div></div>
-  <div class="f-links">
-    <a class="f-link" href="#">About</a>
-    <a class="f-link" href="#">GitHub</a>
-    <a class="f-link" href="#">AWS</a>
-    <a class="f-link" href="#">API Docs</a>
-  </div>
-  <div class="f-txt">{len(movies):,} movies · TMDB Dataset · © 2025 CineAI · Cloud Project</div>
-</div>
-""", unsafe_allow_html=True)
- 
+    hidden = df[(df['vote_average'] >= 7.5) & (df['popularity'] < df['popularity'].quantile(0.4))].sort_values('vote_average', ascending=False).head(10)
+    show_movie_row(hidden)
+
+# ─── BROWSE BY DECADE ──────────────────────────────────────────────────────────
+st.markdown('<div class="section-title">📅 Browse by Decade</div>', unsafe_allow_html=True)
+decades = ['1970s', '1980s', '1990s', '2000s', '2010s', '2020s']
+decade_map = {'1970s': ('1970','1979'), '1980s': ('1980','1989'), '1990s': ('1990','1999'),
+              '2000s': ('2000','2009'), '2010s': ('2010','2019'), '2020s': ('2020','2029')}
+
+dcols = st.columns(6)
+selected_decade = None
+for i, d in enumerate(decades):
+    with dcols[i]:
+        if st.button(d, use_container_width=True):
+            selected_decade = d
+
+if selected_decade:
+    start, end = decade_map[selected_decade]
+    decade_movies = df[(df['release_date'].str[:4] >= start) & (df['release_date'].str[:4] <= end)].sort_values('popularity', ascending=False).head(10)
+    st.markdown(f"**Top movies from the {selected_decade}:**")
+    show_movie_row(decade_movies)
+
+# ─── FOOTER ────────────────────────────────────────────────────────────────────
+st.markdown("---")
+st.markdown('<p style="text-align:center;color:#666;font-size:0.85rem">CineAI · Built with Python + Streamlit · TF-IDF + Cosine Similarity · TMDB Dataset · AWS EC2 Deployed</p>', unsafe_allow_html=True)
